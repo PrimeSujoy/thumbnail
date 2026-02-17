@@ -16,27 +16,22 @@ dp = Dispatcher()
 # ---------- DB ----------
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS thumbs (
                 user_id INTEGER PRIMARY KEY,
                 file_id TEXT NOT NULL
             )
-            """
-        )
+        """)
         await db.commit()
 
 
 async def set_thumb(user_id: int, file_id: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
+        await db.execute("""
             INSERT INTO thumbs(user_id, file_id)
             VALUES (?, ?)
             ON CONFLICT(user_id) DO UPDATE SET file_id=excluded.file_id
-            """,
-            (user_id, file_id),
-        )
+        """, (user_id, file_id))
         await db.commit()
 
 
@@ -88,33 +83,43 @@ async def photo_handler(msg: Message):
     await msg.answer("✅ Thumbnail saved! Now send a video.")
 
 
-# ---------- Apply thumb to video (KEEP caption formatting) ----------
+# ---------- Apply thumb to video using send_cached_media ----------
 @dp.message(F.video)
 async def video_handler(msg: Message):
     thumb = await get_thumb(msg.from_user.id)
     if not thumb:
         return await msg.answer("⚠️ No thumbnail set. Send a photo first.")
 
-    # Keep caption EXACTLY the same (including bold/code/spoiler/links)
     caption = msg.caption
     caption_entities = msg.caption_entities
 
     try:
-        await bot.send_video(
+        # send_cached_media should work with video file_id too (Telegram cached file)
+        await bot.send_cached_media(
             chat_id=msg.chat.id,
-            video=msg.video.file_id,
+            file_id=msg.video.file_id,
             caption=caption,
             caption_entities=caption_entities,
             cover=thumb,
         )
-    except Exception:
-        # If Telegram rejects cover (size/ratio), still keep formatting in fallback
-        await bot.send_video(
-            chat_id=msg.chat.id,
-            video=msg.video.file_id,
-            caption=caption,
-            caption_entities=caption_entities,
-        )
+    except Exception as e:
+        # fallback: still preserve caption formatting
+        await msg.answer(f"⚠️ send_cached_media failed ({type(e).__name__}). Falling back to send_video…")
+        try:
+            await bot.send_video(
+                chat_id=msg.chat.id,
+                video=msg.video.file_id,
+                caption=caption,
+                caption_entities=caption_entities,
+                cover=thumb,
+            )
+        except Exception:
+            await bot.send_video(
+                chat_id=msg.chat.id,
+                video=msg.video.file_id,
+                caption=caption,
+                caption_entities=caption_entities,
+            )
 
 
 # ---------- Run ----------
