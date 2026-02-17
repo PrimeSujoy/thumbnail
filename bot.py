@@ -1,20 +1,26 @@
 import asyncio
 import aiosqlite
-from pyrogram import Client, filters
+import aiohttp
+
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 
-# ========= CONFIG =========
+# ================== CONFIG ==================
 API_ID = "22182189"
-API_HASH = "5e7c4088f8e23d0ab61e29ae11960bf5"
+API_HASH = "8419073003:AAFG1YujfPnjlZ29KjDw1CqCte7p_f0WLTQ"
 BOT_TOKEN = "8419073003:AAFG1YujfPnjlZ29KjDw1CqCte7p_f0WLTQ"
+
 DB_PATH = "thumbs.db"
-# ==========================
+
+# Your FastAPI/Aiogram service (running on same VPS)
+API_URL = "http://127.0.0.1:8008/send_cover_video"
+# ===========================================
 
 app = Client(
-    "thumb_test_bot",
+    "thumb_pyro_api_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
+    bot_token=BOT_TOKEN
 )
 
 # ---------- DB ----------
@@ -50,15 +56,41 @@ async def clear_thumb(user_id: int) -> bool:
         return cur.rowcount > 0
 
 
+# ---------- API Caller ----------
+async def send_cover_via_api(chat_id: int, video_file_id: str, thumb_file_id: str,
+                             caption: str | None, caption_entities):
+    # caption_entities from pyrogram are objects -> convert to dict
+    entities_payload = None
+    if caption_entities:
+        entities_payload = [e.to_dict() for e in caption_entities]
+
+    payload = {
+        "chat_id": chat_id,
+        "video_file_id": video_file_id,
+        "thumb_file_id": thumb_file_id,
+        "caption": caption,
+        "caption_entities": entities_payload,
+        "protect_content": False,
+    }
+
+    async with aiohttp.ClientSession() as s:
+        async with s.post(API_URL, json=payload, timeout=90) as r:
+            text = await r.text()
+            if r.status != 200:
+                raise RuntimeError(f"API {r.status}: {text}")
+            return text
+
+
 # ---------- Commands ----------
 @app.on_message(filters.private & filters.command("start"))
 async def start_cmd(_, msg: Message):
     await msg.reply_text(
-        "🎬 Thumbnail Cover Test (pyrofork)\n\n"
+        "🎬 *Instant Thumbnail Bot (Pyrogram → API)*\n\n"
         "📸 Send PHOTO → thumbnail saved\n"
-        "🎥 Send VIDEO → resend with cover using send_cached_media\n\n"
+        "🎥 Send VIDEO → I resend with your cover via API\n\n"
         "/thumb - view thumbnail\n"
-        "/clear - remove thumbnail"
+        "/clear - remove thumbnail",
+        quote=True
     )
 
 @app.on_message(filters.private & filters.command("thumb"))
@@ -66,26 +98,31 @@ async def thumb_cmd(_, msg: Message):
     thumb = await get_thumb(msg.from_user.id)
     if not thumb:
         return await msg.reply_text("❌ No thumbnail set. Send a photo first.")
-    await msg.reply_photo(thumb, caption="🖼 Your current thumbnail")
+    try:
+        await msg.reply_photo(thumb, caption="🖼 Your current thumbnail.")
+    except Exception:
+        # If thumb is invalid, clear and ask to re-send
+        await clear_thumb(msg.from_user.id)
+        await msg.reply_text("⚠️ Your stored thumbnail was invalid. Please send a new photo.")
 
 @app.on_message(filters.private & filters.command("clear"))
 async def clear_cmd(_, msg: Message):
     ok = await clear_thumb(msg.from_user.id)
-    await msg.reply_text("🗑 Thumbnail removed" if ok else "❌ No thumbnail to remove")
+    await msg.reply_text("🗑 Thumbnail removed." if ok else "❌ No thumbnail to remove.")
 
 
 # ---------- Save thumb ----------
 @app.on_message(filters.private & filters.photo)
 async def photo_handler(_, msg: Message):
-    # highest quality photo is usually last
-    file_id = msg.photo.file_id if hasattr(msg.photo, "file_id") else msg.photo[-1].file_id
+    # highest quality photo is last in list (in pyrogram msg.photo is Photo object)
+    file_id = msg.photo.file_id
     await set_thumb(msg.from_user.id, file_id)
     await msg.reply_text("✅ Thumbnail saved! Now send a video.")
 
 
-# ---------- Apply cover to video ----------
+# ---------- Handle video ----------
 @app.on_message(filters.private & filters.video)
-async def video_handler(client: Client, msg: Message):
+async def video_handler(_, msg: Message):
     thumb = await get_thumb(msg.from_user.id)
     if not thumb:
         return await msg.reply_text("⚠️ No thumbnail set. Send a photo first.")
@@ -93,45 +130,14 @@ async def video_handler(client: Client, msg: Message):
     caption = msg.caption
     caption_entities = msg.caption_entities
 
-    # 1) Try the exact concept: send_cached_media + cover
     try:
-        await client.send_cached_media(
+        await send_cover_via_api(
             chat_id=msg.chat.id,
-            file_id=msg.video.file_id,
+            video_file_id=msg.video.file_id,
+            thumb_file_id=thumb,
             caption=caption,
-            caption_entities=caption_entities,
-            cover=thumb,
+            caption_entities=caption_entities
         )
-        return
-    except Exception as e1:
-        await msg.reply_text(f"⚠️ send_cached_media cover failed ({type(e1).__name__}). Trying send_video...")
-
-    # 2) Fallback: send_video + cover
-    try:
-        await client.send_video(
-            chat_id=msg.chat.id,
-            video=msg.video.file_id,
-            caption=caption,
-            caption_entities=caption_entities,
-            cover=thumb,
-        )
-        return
-    except Exception as e2:
-        await msg.reply_text(f"⚠️ send_video cover failed ({type(e2).__name__}). Sending without cover...")
-
-    # 3) Final fallback: without cover
-    await client.send_video(
-        chat_id=msg.chat.id,
-        video=msg.video.file_id,
-        caption=caption,
-        caption_entities=caption_entities,
-    )
-
-
-if __name__ == "__main__":
-    print("✅ Bot started (pyrofork test)!")
-    app.start()
-    app.loop.run_until_complete(init_db())
-    from pyrogram import idle
-    idle()
-    app.stop()
+    except Exception as e:
+        # fallback: send normal video without cover but keep formatting
+        await msg.reply_text(f"⚠️
