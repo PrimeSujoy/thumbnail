@@ -129,6 +129,9 @@ async def video_handler(client: Client, msg: Message):
 
 
 if __name__ == "__main__":
-    asyncio.run(init_db())
     print("✅ Bot started (pyrofork test)!")
-    app.run()
+    app.start()
+    app.loop.run_until_complete(init_db())
+    from pyrogram import idle
+    idle()
+    app.stop()
